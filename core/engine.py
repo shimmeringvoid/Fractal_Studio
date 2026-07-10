@@ -45,10 +45,14 @@ class ViewState:
         return complex(xmin + px * dx, ymax - py * dx)
 
     def zoomed(self, point: complex, factor: float) -> "ViewState":
-        """Zoom by `factor` keeping `point` fixed on screen."""
+        """Zoom by `factor` keeping `point` fixed on screen (wheel-style)."""
         new_span = self.span / factor
         new_center = point + (self.center - point) / factor
         return ViewState(new_center, new_span)
+
+    def zoomed_centered(self, point: complex, factor: float) -> "ViewState":
+        """Zoom by `factor` with `point` becoming the new center (click-style)."""
+        return ViewState(point, self.span / factor)
 
     def clamped(self, width: int) -> Tuple["ViewState", bool]:
         """Enforce the float64 depth limit. Returns (state, was_clamped)."""

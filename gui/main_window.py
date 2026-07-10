@@ -389,9 +389,10 @@ class MainWindow(QMainWindow):
     def show_cursor_coord(self, c: complex):
         self.coord_label.setText(f"{c.real:+.15f} {c.imag:+.15f}i")
 
-    def zoom_at(self, point: complex, factor: float):
+    def zoom_at(self, point: complex, factor: float, recenter: bool = False):
         self.push_history()
-        v = self.view.zoomed(point, factor)
+        v = (self.view.zoomed_centered(point, factor) if recenter
+             else self.view.zoomed(point, factor))
         v, clamped = v.clamped(max(64, self.canvas.width()))
         self.view = v
         if clamped:
@@ -401,9 +402,9 @@ class MainWindow(QMainWindow):
 
     def on_click(self, point: complex, mods):
         if mods & Qt.KeyboardModifier.ShiftModifier:
-            self.zoom_at(point, 1.0 / self.zoom_click_factor)
+            self.zoom_at(point, 1.0 / self.zoom_click_factor, recenter=True)
         else:
-            self.zoom_at(point, self.zoom_click_factor)
+            self.zoom_at(point, self.zoom_click_factor, recenter=True)
 
     def on_wheel(self, point: complex, factor: float):
         self.zoom_at(point, factor)

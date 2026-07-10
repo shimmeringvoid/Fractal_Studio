@@ -168,7 +168,7 @@ PRESETS: List[EscapeFormula] = [
     EscapeFormula("Mandelbrot  z\u00b2 + c", "z**2 + c", 2.0),
     EscapeFormula("Cubic  z\u00b3 + c", "z**3 + c", 3.0, default_center=0j, default_span=3.0,
                   default_julia_c=0.4 + 0.25j),
-    EscapeFormula("Quartic  z\u2074 + c", "z**4 + c", 4.0, default_center=0j, default_span=2.8,
+    EscapeFormula("Quartic  z^4 + c", "z**4 + c", 4.0, default_center=0j, default_span=2.8,
                   default_julia_c=-0.55 + 0.4j),
     EscapeFormula("Burning Ship", "(abs(re(z)) + 1j*abs(im(z)))**2 + c", 2.0,
                   default_center=-0.45 - 0.55j, default_span=3.4, default_julia_c=-0.598 + 0.9225j),
@@ -251,11 +251,11 @@ class NewtonFormula:
 
 NEWTON_PRESETS: List[NewtonFormula] = [
     NewtonFormula("Newton  z\u00b3 - 1", [1, 0, 0, -1]),
-    NewtonFormula("Newton  z\u2074 - 1", [1, 0, 0, 0, -1]),
+    NewtonFormula("Newton  z^4 - 1", [1, 0, 0, 0, -1]),
     NewtonFormula("Newton  z\u00b3 - 2z + 2", [1, 0, -2, 2]),
-    NewtonFormula("Newton  z\u2075 - 1", [1, 0, 0, 0, 0, -1]),
-    NewtonFormula("Newton  z\u2076 + z\u00b3 - 1", [1, 0, 0, 1, 0, 0, -1]),
-    NewtonFormula("Newton  z\u2078 + 15z\u2074 - 16", [1, 0, 0, 0, 15, 0, 0, 0, -16]),
+    NewtonFormula("Newton  z^5 - 1", [1, 0, 0, 0, 0, -1]),
+    NewtonFormula("Newton  z^6 + z^3 - 1", [1, 0, 0, 1, 0, 0, -1]),
+    NewtonFormula("Newton  z^8 + 15z^4 - 16", [1, 0, 0, 0, 15, 0, 0, 0, -16]),
 ]
 
 

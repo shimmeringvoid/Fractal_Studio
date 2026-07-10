@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Fractal Studio — interactive fractal explorer and video renderer."""
+import os
 import sys
 
 
 def main():
+    os.environ.pop("SESSION_MANAGER", None)  # no session-restore state; avoids Qt SM warnings
     from PySide6.QtWidgets import QApplication
     from gui.main_window import MainWindow
 

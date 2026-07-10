@@ -225,7 +225,7 @@ class FormulaDialog(QDialog):
         f1.addRow("f(z, c) =", self.expr)
         f1.addRow("Degree (for smoothing)", self.degree)
         f1.addRow("Bailout radius", self.bailout)
-        f1.addRow("z\u2080 (mandelbrot plane)", self.z0)
+        f1.addRow("z0 (mandelbrot plane)", self.z0)
         hint = QLabel("Allowed: z, c, numbers, + - * / **, sin cos tan sinh cosh tanh\n"
                       "exp log sqrt asin acos atan abs conj re im")
         hint.setStyleSheet("color: gray")
@@ -239,7 +239,7 @@ class FormulaDialog(QDialog):
         self.coeffs.setPlaceholderText("polynomial coefficients, highest degree first")
         f2.addRow("Name", self.name2)
         f2.addRow("p(z) coeffs", self.coeffs)
-        f2.addRow(QLabel("e.g.  z\u00b3 \u2212 1  \u2192  1, 0, 0, -1     (complex ok: 1, 0, 1j, -1)"))
+        f2.addRow(QLabel("e.g.  z³ - 1  ->  1, 0, 0, -1     (complex ok: 1, 0, 1j, -1)"))
         self.tabs.addTab(w2, "Newton basins p(z)")
 
         bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
@@ -462,7 +462,7 @@ class ZoomVideoDialog(_ExportDialogBase):
     def _update_info(self):
         s = self._spec()
         self.info.setText(f"{s.n_zoom_frames()} frames, "
-                          f"≈{s.duration_seconds():.1f} s of video")
+                          f"~{s.duration_seconds():.1f} s of video")
 
     def _pick(self):
         p, _ = QFileDialog.getSaveFileName(self, "Save video", self.path.text(),
@@ -490,7 +490,7 @@ class JuliaMorphDialog(_ExportDialogBase):
         v = QVBoxLayout(self)
         form = QFormLayout()
         self.path_kind = QComboBox()
-        self.path_kind.addItems(["circle (seamless loop)", "spiral outward", "line to c\u2081"])
+        self.path_kind.addItems(["circle (seamless loop)", "spiral outward", "line to c1"])
         c0 = settings.julia_c
         self.c0 = QLineEdit(f"{c0.real:+.9f}{c0.imag:+.9f}j")
         self.radius = QDoubleSpinBox(); self.radius.setDecimals(6)
@@ -510,10 +510,10 @@ class JuliaMorphDialog(_ExportDialogBase):
         pick = QPushButton("…"); pick.setFixedWidth(30); pick.clicked.connect(self._pick)
         prow = QHBoxLayout(); prow.addWidget(self.path); prow.addWidget(pick)
         form.addRow("Path", self.path_kind)
-        form.addRow("c\u2080", self.c0)
+        form.addRow("c0", self.c0)
         form.addRow("Radius", self.radius)
         form.addRow("Turns", self.turns)
-        form.addRow("c\u2081 (line)", self.c1)
+        form.addRow("c1 (line)", self.c1)
         form.addRow(self.roundtrip)
         form.addRow("Duration (s)", self.duration)
         form.addRow("FPS", self.fps)
