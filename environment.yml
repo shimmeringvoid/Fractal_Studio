@@ -1,0 +1,22 @@
+# Fractal Studio conda environment
+#
+# Important: PySide6 must come from conda-forge here, NOT pip.
+# The pip wheels of PySide6 >= 6.3 require glibc >= 2.28, and Ubuntu 18.04
+# has glibc 2.27 -- pip installs will fail or crash on import. conda-forge
+# builds Qt6/PySide6 against a glibc 2.17 sysroot, so its packages run fine
+# on 18.04. Never `pip install pyside6` inside this env.
+name: fractal
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.12          # version the app was tested against
+  - numpy
+  - numba                # parallel CPU kernels (JIT)
+  - pyside6>=6.6         # GUI -- conda-forge build, glibc-2.17 compatible
+  - imageio
+  - pillow
+  - pip
+  - pip:
+      - imageio-ffmpeg   # bundles a static ffmpeg (with libx264) -- the
+                         # exact video path the app was tested with
