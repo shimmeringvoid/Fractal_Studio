@@ -324,7 +324,7 @@ class MainWindow(QMainWindow):
         self.info_label = QLabel("")
         self.pbar = QProgressBar(); self.pbar.setMaximumWidth(160)
         self.pbar.setRange(0, 1000); self.pbar.hide()
-        self.cancel_btn = QPushButton("✕"); self.cancel_btn.setFixedWidth(24)
+        self.cancel_btn = QPushButton("Stop"); self.cancel_btn.setFixedWidth(44)
         self.cancel_btn.clicked.connect(self.cancel_render); self.cancel_btn.hide()
         sb.addWidget(self.coord_label, 1)
         sb.addPermanentWidget(self.info_label)

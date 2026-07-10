@@ -329,7 +329,7 @@ class _ExportDialogBase(QDialog):
         elif out is False or out is None:
             self.status.setText("cancelled")
         else:
-            self.status.setText("done ✓")
+            self.status.setText("done")
         self.thread = None
 
     def _make_job(self):
