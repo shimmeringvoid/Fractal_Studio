@@ -269,8 +269,8 @@ class _JobThread(QThread):
     progressed = Signal(float, str)
     done = Signal(object)
 
-    def __init__(self, fn):
-        super().__init__()
+    def __init__(self, fn, parent=None):
+        super().__init__(parent)      # parented: Qt owns it, never GC'd mid-run
         self.fn = fn
         self.cancel = eng.CancelToken()
 
@@ -304,7 +304,7 @@ class _ExportDialogBase(QDialog):
         if fn is None:
             return
         self._t0 = time.time()
-        self.thread = _JobThread(fn)
+        self.thread = _JobThread(fn, parent=self)
         self.thread.progressed.connect(self._on_progress)
         self.thread.done.connect(self._on_done)
         self.go.setEnabled(False); self.stop.setEnabled(True)
@@ -336,9 +336,12 @@ class _ExportDialogBase(QDialog):
         raise NotImplementedError
 
     def closeEvent(self, ev):
-        if self.thread and self.thread.isRunning():
-            self.thread.cancel.cancel()
-            self.thread.wait(5000)
+        t = self.thread
+        if t is not None:
+            self.thread = None
+            t.cancel.cancel()
+            t.wait()              # unbounded: a bounded wait can expire mid-frame,
+                                  # letting Qt destroy a live QThread -> abort
         super().closeEvent(ev)
 
 
@@ -424,6 +427,9 @@ class ZoomVideoDialog(_ExportDialogBase):
         self.cycle = QCheckBox("Cycle palette during zoom")
         self.cycle_speed = QDoubleSpinBox(); self.cycle_speed.setRange(1, 500)
         self.cycle_speed.setValue(cs.cycle_speed)
+        self.crf = QSpinBox(); self.crf.setRange(12, 32); self.crf.setValue(20)
+        self.crf.setToolTip("H.264 quality: lower = better and larger. "
+                            "18 transparent, 20 default, 23-26 smaller.")
         self.keep_png = QCheckBox("Also keep PNG frame sequence")
         self.path = QLineEdit(os.path.expanduser("~/fractal_zoom.mp4"))
         pick = QPushButton("…"); pick.setFixedWidth(30); pick.clicked.connect(self._pick)
@@ -437,9 +443,14 @@ class ZoomVideoDialog(_ExportDialogBase):
         form.addRow("Hold at end (s)", self.hold)
         form.addRow(self.cycle)
         form.addRow("Cycle speed (idx/s)", self.cycle_speed)
+        form.addRow("Quality (CRF)", self.crf)
         form.addRow(self.keep_png)
         form.addRow("Output MP4", prow)
         form.addRow(self.info)
+        self.warn = QLabel("")
+        self.warn.setWordWrap(True)
+        self.warn.setStyleSheet("color: #b25000")
+        form.addRow(self.warn)
         v.addLayout(form)
         self._add_progress_ui(v)
         for wgt in (self.fps, self.rate, self.start_span):
@@ -457,12 +468,26 @@ class ZoomVideoDialog(_ExportDialogBase):
                                  width=W, height=H, supersample=int(self.ss.currentText()),
                                  hold_seconds=self.hold.value(),
                                  cycle_colors=self.cycle.isChecked(),
-                                 cycle_speed=self.cycle_speed.value(), png_dir=png_dir)
+                                 cycle_speed=self.cycle_speed.value(), png_dir=png_dir,
+                                 crf=self.crf.value())
 
     def _update_info(self):
         s = self._spec()
-        self.info.setText(f"{s.n_zoom_frames()} frames, "
-                          f"~{s.duration_seconds():.1f} s of video")
+        n = s.n_zoom_frames()
+        self.info.setText(f"{n} frames, ~{s.duration_seconds():.1f} s of video")
+        # Cost estimate, calibrated against a real render: 2806 frames at 4K,
+        # ss=2, deep dive -> ~8 h on 12 threads = ~3.2 Mpx/s (deep frames run
+        # thousands of iterations/pixel, so throughput is far below shallow views).
+        px = n * s.width * s.height * (s.supersample ** 2)
+        cpu_hours = px / 3.2e6 / 3600.0
+        gb = n * s.width * s.height * 3.7e-11    # ~0.037 bytes/px, measured at CRF 20
+        msg = []
+        if cpu_hours >= 0.5:
+            msg.append(f"Rough CPU render estimate: ~{cpu_hours:.1f} h on 12 threads.")
+        if gb >= 0.5:
+            msg.append(f"Approx file size: ~{gb:.1f} GB; 4K fractal video is heavy "
+                       f"to decode, so make a 1080p copy for viewing.")
+        self.warn.setText("  ".join(msg))
 
     def _pick(self):
         p, _ = QFileDialog.getSaveFileName(self, "Save video", self.path.text(),

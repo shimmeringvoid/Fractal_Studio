@@ -53,6 +53,8 @@ class ZoomVideoSpec:
     cycle_colors: bool = False             # palette cycling during the zoom
     cycle_speed: float = 40.0              # indices per second
     png_dir: Optional[str] = None          # also dump frames here if set
+    crf: int = 20                          # H.264 quality (lower = better/larger)
+    preset: str = "slow"
 
     def n_zoom_frames(self) -> int:
         total_mag = max(self.start_span / self.end_view.span, 1.0 + 1e-9)
@@ -82,6 +84,8 @@ class JuliaMorphSpec:
     cycle_colors: bool = False
     cycle_speed: float = 40.0
     png_dir: Optional[str] = None
+    crf: int = 20
+    preset: str = "slow"
 
     def n_frames(self) -> int:
         return max(2, int(round(self.duration * self.fps)))
@@ -111,10 +115,24 @@ def _smoothstep(t: float) -> float:
 # ----------------------------------------------------------------------------- writer
 
 class _Writer:
-    def __init__(self, path: str, fps: int, png_dir: Optional[str]):
+    """H.264 writer.
+
+    Fractal frames are maximum-entropy content (every pixel differs; palette
+    cycling defeats temporal prediction), so a fixed quality scale produces
+    absurd bitrates -- 4K fractal video encoded at imageio's `quality=8`
+    lands near 600 Mbps, which is ~6x 4K Blu-ray and unplayable on most
+    machines. Encode by CRF instead: it targets visual quality and lets the
+    bitrate fall where it must. CRF 18 is visually transparent; 20-23 is
+    smaller and still excellent.
+    """
+
+    def __init__(self, path: str, fps: int, png_dir: Optional[str],
+                 crf: int = 20, preset: str = "slow"):
         os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
-        self.w = imageio.get_writer(path, fps=fps, codec="libx264", quality=8,
-                                    macro_block_size=8, pixelformat="yuv420p")
+        self.w = imageio.get_writer(
+            path, fps=fps, codec="libx264", macro_block_size=8,
+            pixelformat="yuv420p",
+            output_params=["-crf", str(crf), "-preset", preset])
         self.png_dir = png_dir
         if png_dir:
             os.makedirs(png_dir, exist_ok=True)
@@ -139,7 +157,7 @@ def render_zoom_video(spec: ZoomVideoSpec, settings: RenderSettings, palette: Pa
     """Render a zoom-in video ending at spec.end_view. Returns False if cancelled."""
     n = spec.n_zoom_frames()
     per_frame = spec.rate_per_sec ** (1.0 / spec.fps)
-    writer = _Writer(out_path, spec.fps, spec.png_dir)
+    writer = _Writer(out_path, spec.fps, spec.png_dir, spec.crf, spec.preset)
     base_offset = cs.offset
     try:
         last = None
@@ -176,7 +194,7 @@ def render_julia_morph_video(spec: JuliaMorphSpec, settings: RenderSettings,
                              cancel: Optional[CancelToken] = None) -> bool:
     """Render a Julia morph (optionally combined with a zoom)."""
     n = spec.n_frames()
-    writer = _Writer(out_path, spec.fps, spec.png_dir)
+    writer = _Writer(out_path, spec.fps, spec.png_dir, spec.crf, spec.preset)
     base_offset = cs.offset
     span0 = spec.view.span
     span1 = spec.zoom_end_span if spec.zoom_end_span else span0

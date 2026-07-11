@@ -45,8 +45,9 @@ class RenderThread(QThread):
     field_ready = Signal(object, object, int)    # RenderResult, rgb ndarray, generation
     progressed = Signal(float, int)
 
-    def __init__(self, settings, view, palette, cs, width, height, supersample, gen):
-        super().__init__()
+    def __init__(self, settings, view, palette, cs, width, height, supersample, gen,
+                 parent=None):
+        super().__init__(parent)          # parented so Qt owns it; never GC'd mid-run
         self.args = (copy.deepcopy(settings), view, palette, cs, width, height,
                      supersample, gen)
         self.cancel = eng.CancelToken()
@@ -162,6 +163,16 @@ class MainWindow(QMainWindow):
         self.gen = 0
         self.thread: RenderThread | None = None
         self.cached: eng.RenderResult | None = None
+        # Every started thread stays referenced here until it truly exits. A
+        # cancelled render keeps running until its current strip finishes (the
+        # token is only checked between strips, and one strip -- or the first
+        # Numba JIT compile -- can take many seconds when the CPU is busy, e.g.
+        # an ffmpeg encode in another window). Dropping the reference before
+        # then lets Python GC a live QThread and Qt aborts with
+        # "QThread: Destroyed while thread is still running".
+        self._live: list[RenderThread] = []
+        self._closing = False
+        self._closing = False        # set in closeEvent; blocks new renders
 
         self.canvas = FractalView(self)
         self.setCentralWidget(self.canvas)
@@ -333,25 +344,43 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ rendering
     def request_render(self):
+        if self._closing:            # a queued timer must not resurrect a thread
+            return
         self.cancel_render()
         self.gen += 1
         W = max(64, self.canvas.width())
         H = max(48, self.canvas.height())
         ss = int(self.ss_cb.currentText())
-        self.thread = RenderThread(self.settings, self.view, self.palette_obj,
-                                   self.cs, W, H, ss, self.gen)
-        self.thread.preview_ready.connect(self._on_preview)
-        self.thread.field_ready.connect(self._on_field)
-        self.thread.progressed.connect(self._on_progress)
+        t = RenderThread(self.settings, self.view, self.palette_obj,
+                         self.cs, W, H, ss, self.gen, parent=self)
+        self.thread = t
+        self._live.append(t)
+        t.finished.connect(lambda th=t: self._reap(th))
+        t.preview_ready.connect(self._on_preview)
+        t.field_ready.connect(self._on_field)
+        t.progressed.connect(self._on_progress)
         self._t0 = time.time()
         self.pbar.setValue(0); self.pbar.show(); self.cancel_btn.show()
-        self.info_label.setText(self._info_text() + "   rendering…")
-        self.thread.start()
+        self.info_label.setText(self._info_text() + "   rendering\u2026")
+        t.start()
+
+    def _reap(self, t: "RenderThread"):
+        """The thread has genuinely exited; only now is it safe to drop it."""
+        if t in self._live:
+            self._live.remove(t)
+        if self.thread is t:          # don't leave a dangling pointer behind
+            self.thread = None
+        t.deleteLater()
 
     def cancel_render(self):
+        """Ask the current render to stop. Does NOT block the GUI thread.
+
+        The thread finishes its current strip and exits on its own; it stays
+        referenced in self._live until then, so it is never GC'd while alive.
+        Late results from it are ignored via the generation counter.
+        """
         if self.thread is not None:
             self.thread.cancel.cancel()
-            self.thread.wait(3000)
             self.thread = None
 
     def _on_preview(self, rgb, gen):
@@ -667,5 +696,12 @@ class MainWindow(QMainWindow):
         self.resize_timer.start()
 
     def closeEvent(self, ev):
+        self._closing = True
+        self.cycle_timer.stop()
+        self.resize_timer.stop()      # a pending resize would start a new render
         self.cancel_render()
+        for t in list(self._live):    # unbounded: never destroy a live QThread
+            t.cancel.cancel()
+            t.wait()
+        self._live.clear()
         super().closeEvent(ev)
