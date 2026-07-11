@@ -91,50 +91,24 @@ Newton kernel can follow. Verify Numba CUDA support for the Titans'
 compute capability; Maxwell needs CUDA <= 11.x toolchains — pin accordingly.
 The GTX 1650 laptop (sm_75) can be the dev/test GPU.
 
-## Workstream B: DeepDream frame filter (phase 2)
+## Workstream B: DeepDream video filter — SEPARATE REPO
 
-Background: long ago rafa independently discovered this effect on an early
-CNN — feeding a "flower detector" node's output back amplified flower
-hallucinations over ~5 iterations. That is DeepDream / "Inceptionism"
-(Mordvintsev, Olah & Tyka, Google 2015): iterated gradient ascent on the
-*input image* to maximize a chosen unit's activation. Goal here: apply it
-per-frame to fractal videos ("flower fractals").
+The DeepDream feature lives in its own project, `deepdream-video` (separate
+repo, separate PyTorch/CUDA env), NOT in this codebase. Rationale: it's a
+general video-to-video filter, useful on any footage, and its PyTorch/CUDA
+dependency stack must not co-resolve with this repo's fragile
+conda-forge/PySide6/glibc-2.27 env. The two projects meet only through a
+folder of numbered PNG frames — exactly what this app's "keep PNG frames"
+video option emits. Fractal Studio is just one upstream frame source.
 
-Technical plan:
-* PyTorch + torchvision pretrained net. GoogLeNet/Inception-v1 is the
-  classic dreamer (mid layers like inception4c/4d); VGG16 also works well.
-  Objective: L2 norm of the chosen channel's activation (hook the layer).
-* Per image: 3–5 octaves (scale ~1.4), re-adding lost detail between
-  octaves; per octave 10–20 steps of: random jitter roll (<=32 px), forward,
-  backward, `img += lr * grad / (mean|grad| + eps)`, unroll, clamp.
-* Channel discovery: batch-dream noise/gray images per channel into a
-  contact sheet; pick "flower"-like channels by eye. (ImageNet nets have
-  plenty of flora/texture detectors in mid layers.)
-* **Temporal coherence (the interesting part):** naive per-frame dreaming
-  flickers. Standard fixes: seed frame t with the dreamed frame t-1 blended
-  with the fresh frame t; fixed jitter seeds. Our advantage: for zoom videos
-  the exact inter-frame transform is known (pure scale about center by the
-  per-frame factor), so warp dream(t-1) by that zoom before blending —
-  init = a*zoomwarp(dream[t-1]) + (1-a)*frame[t], a≈0.5–0.8. Should give
-  far better coherence than optical flow guessing.
-* Shape: standalone CLI first — `dream/dream_frames.py --in DIR --out DIR
-  --model googlenet --layer inception4c --channel N --octaves 4 --steps 12
-  --blend 0.6 --coherent-zoom RATE` operating on the PNG sequences the video
-  dialogs already emit; re-encode with ffmpeg. GUI checkbox later.
-* Performance: dream at 1080p–2K and upscale for 4K if needed (or tile);
-  shard frame ranges across the 4 workstation GPUs.
-* PyTorch install caution: recent PyTorch binaries may have dropped Maxwell
-  (sm_52). Check `torch.cuda.get_arch_list()` against `nvidia-smi`; pin an
-  older torch (e.g. 1.13/2.0-era cu11x) if the Titans are Maxwell. Laptop's
-  sm_75 works on any recent build — prototype there.
-
-Milestones: (1) single-image flower-dream on the laptop GPU; (2) coherent
-5-second dreamed zoom clip; (3) multi-GPU batch on the workstation.
-
-Open questions for rafa: which network aesthetic (GoogLeNet's ornate look
-vs AlexNet-era chunkier features, closer to the original memory)? dream
-strength constant vs ramping during the zoom? per-video channel, or blend
-several channels?
+The one fractal-specific hook worth remembering: for zoom videos the exact
+inter-frame transform is a pure scale about center by the per-frame factor.
+Exposing that (it's already derivable from the ZoomVideoSpec) lets the dreamer
+warp-and-blend dream[t-1] into the seed for frame t, giving strong temporal
+coherence. Consider writing the per-frame zoom factor into a sidecar
+(e.g. frames_meta.json) alongside the PNG sequence so the dreamer can consume
+it without knowing anything else about fractals. See the deepdream-video repo's
+own CLAUDE.md for that project's full spec.
 
 ## Working conventions that have served well
 
