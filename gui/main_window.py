@@ -280,7 +280,11 @@ class MainWindow(QMainWindow):
         self.cycle_speed.setRange(1, 500); self.cycle_speed.setValue(self.cs.cycle_speed)
         self.cycle_speed.valueChanged.connect(
             lambda v: setattr(self.cs, "cycle_speed", v))
+        self.cycle_rev = QCheckBox("Reverse")
+        self.cycle_rev.toggled.connect(
+            lambda on: setattr(self.cs, "cycle_reverse", bool(on)))
         cyc.addWidget(self.cycle_cb); cyc.addWidget(self.cycle_speed)
+        cyc.addWidget(self.cycle_rev)
         form.addRow(cyc)
 
         self.ss_cb = QComboBox(); self.ss_cb.addItems(["1", "2"])
@@ -500,8 +504,10 @@ class MainWindow(QMainWindow):
 
     def _sync_widgets_from_state(self):
         for wdg in (self.mode_cb, self.plane_cb, self.julia_edit, self.iter_spin,
-                    self.auto_iter, self.density, self.offset_slider, self.log_cb):
+                    self.auto_iter, self.density, self.offset_slider, self.log_cb,
+                    self.cycle_rev):
             wdg.blockSignals(True)
+        self.cycle_rev.setChecked(self.cs.cycle_reverse)
         self.mode_cb.setCurrentIndex(1 if self.settings.mode == "newton" else 0)
         self.plane_cb.setCurrentIndex(1 if self.settings.plane == "julia" else 0)
         self.julia_edit.setText(self._fmt_c(self.settings.julia_c))
@@ -511,7 +517,8 @@ class MainWindow(QMainWindow):
         self.offset_slider.setValue(int(self.cs.offset) % 255)
         self.log_cb.setChecked(self.cs.log_mode)
         for wdg in (self.mode_cb, self.plane_cb, self.julia_edit, self.iter_spin,
-                    self.auto_iter, self.density, self.offset_slider, self.log_cb):
+                    self.auto_iter, self.density, self.offset_slider, self.log_cb,
+                    self.cycle_rev):
             wdg.blockSignals(False)
         if self.palette_cb.findText(self.palette_obj.name) < 0:
             self.palettes.append(self.palette_obj)
@@ -616,8 +623,10 @@ class MainWindow(QMainWindow):
 
     def _cycle_tick(self):
         now = time.time()
-        self.cs.offset = (self.cs.offset + self.cs.cycle_speed *
-                          (now - self._last_cycle)) % 255.0
+        step = self.cs.cycle_speed * (now - self._last_cycle)
+        if self.cs.cycle_reverse:
+            step = -step
+        self.cs.offset = (self.cs.offset + step) % 255.0
         self._last_cycle = now
         self.offset_slider.blockSignals(True)
         self.offset_slider.setValue(int(self.cs.offset))

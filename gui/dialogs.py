@@ -1,11 +1,12 @@
 """Dialogs: palette editor, custom formula, high-res image save, video exports."""
 from __future__ import annotations
 
+import dataclasses
 import os
 import time
 
 import numpy as np
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QColor, QImage, QPixmap
 from PySide6.QtWidgets import (QCheckBox, QColorDialog, QComboBox, QDialog,
                                QDialogButtonBox, QDoubleSpinBox, QFileDialog,
@@ -282,6 +283,69 @@ class _JobThread(QThread):
         self.done.emit(out)
 
 
+class PreviewPlayer(QDialog):
+    """Loops rendered frames in-app. No video file, no system codecs -- the
+    frames go straight from the renderer to the screen."""
+
+    def __init__(self, parent, frames, fps: int, title: str = "Low-res preview"):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.frames = frames
+        self.fps = max(1, int(fps))
+        self.i = 0
+        h, w, _ = frames[0].shape
+        scale = 2 if w <= 480 else 1
+        v = QVBoxLayout(self)
+        self.view = QLabel()
+        self.view.setFixedSize(w * scale, h * scale)
+        self.view.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        v.addWidget(self.view)
+        self.pos = QLabel("")
+        row = QHBoxLayout()
+        self.play_btn = QPushButton("Pause")
+        self.play_btn.clicked.connect(self._toggle)
+        close = QPushButton("Close")
+        close.clicked.connect(self.accept)
+        row.addWidget(self.pos, 1)
+        row.addWidget(self.play_btn)
+        row.addWidget(close)
+        v.addLayout(row)
+        self._scale = scale
+        self.timer = QTimer(self)
+        self.timer.setInterval(int(1000 / self.fps))
+        self.timer.timeout.connect(self._tick)
+        self._tick()
+        self.timer.start()
+
+    def _tick(self):
+        f = self.frames[self.i]
+        h, w, _ = f.shape
+        img = QImage(f.tobytes(), w, h, 3 * w, QImage.Format.Format_RGB888)
+        pix = QPixmap.fromImage(img)
+        if self._scale != 1:
+            pix = pix.scaled(w * self._scale, h * self._scale)
+        self.view.setPixmap(pix)
+        self.pos.setText(f"frame {self.i + 1}/{len(self.frames)}   "
+                         f"t = {self.i / self.fps:.1f} s   (looping)")
+        self.i = (self.i + 1) % len(self.frames)
+
+    def _toggle(self):
+        if self.timer.isActive():
+            self.timer.stop()
+            self.play_btn.setText("Play")
+        else:
+            self.timer.start()
+            self.play_btn.setText("Pause")
+
+    def closeEvent(self, ev):
+        self.timer.stop()
+        super().closeEvent(ev)
+
+
+PREVIEW_FPS = 10
+PREVIEW_WIDTH = 384
+
+
 class _ExportDialogBase(QDialog):
     """Shared progress/cancel plumbing for long exports."""
 
@@ -290,25 +354,42 @@ class _ExportDialogBase(QDialog):
         self.status = QLabel("")
         v.addWidget(self.pbar); v.addWidget(self.status)
         row = QHBoxLayout()
+        self.preview_btn = QPushButton("Preview")
+        self.preview_btn.setToolTip(f"Render the same animation at {PREVIEW_WIDTH}px / "
+                                    f"{PREVIEW_FPS} fps and loop it in-app -- quick way "
+                                    f"to check the path before a long render.")
+        self.preview_btn.clicked.connect(self._start_preview)
         self.go = QPushButton("Render"); self.go.clicked.connect(self._start)
         self.stop = QPushButton("Cancel"); self.stop.setEnabled(False)
         self.stop.clicked.connect(self._cancel)
         close = QPushButton("Close"); close.clicked.connect(self.reject)
-        row.addStretch(1); row.addWidget(self.go); row.addWidget(self.stop); row.addWidget(close)
+        row.addStretch(1); row.addWidget(self.preview_btn); row.addWidget(self.go)
+        row.addWidget(self.stop); row.addWidget(close)
         v.addLayout(row)
         self.thread: _JobThread | None = None
         self._t0 = 0.0
 
-    def _start(self):
-        fn = self._make_job()
-        if fn is None:
-            return
+    def _launch(self, fn):
         self._t0 = time.time()
         self.thread = _JobThread(fn, parent=self)
         self.thread.progressed.connect(self._on_progress)
         self.thread.done.connect(self._on_done)
-        self.go.setEnabled(False); self.stop.setEnabled(True)
+        self.go.setEnabled(False); self.preview_btn.setEnabled(False)
+        self.stop.setEnabled(True)
         self.thread.start()
+
+    def _start(self):
+        fn = self._make_job()
+        if fn is not None:
+            self._launch(fn)
+
+    def _start_preview(self):
+        fn = self._make_preview_job()
+        if fn is not None:
+            self._launch(fn)
+
+    def _make_preview_job(self):
+        return None          # dialogs without a preview keep the button hidden
 
     def _cancel(self):
         if self.thread:
@@ -322,15 +403,22 @@ class _ExportDialogBase(QDialog):
         self.status.setText(f"{msg}   elapsed {el:.0f}s   eta {eta:.0f}s")
 
     def _on_done(self, out):
-        self.go.setEnabled(True); self.stop.setEnabled(False)
+        self.go.setEnabled(True); self.preview_btn.setEnabled(True)
+        self.stop.setEnabled(False)
+        self.thread = None
         if isinstance(out, Exception):
             QMessageBox.critical(self, "Render failed", str(out))
             self.status.setText("failed")
+        elif isinstance(out, list):
+            if out:
+                self.status.setText(f"preview: {len(out)} frames")
+                PreviewPlayer(self, out, PREVIEW_FPS).exec()
+            else:
+                self.status.setText("preview produced no frames")
         elif out is False or out is None:
             self.status.setText("cancelled")
         else:
             self.status.setText("done")
-        self.thread = None
 
     def _make_job(self):
         raise NotImplementedError
@@ -375,6 +463,7 @@ class SaveImageDialog(_ExportDialogBase):
         form.addRow("File", prow)
         v.addLayout(form)
         self._add_progress_ui(v)
+        self.preview_btn.hide()
 
     def _pick(self):
         p, _ = QFileDialog.getSaveFileName(self, "Save image", self.path.text(),
@@ -468,8 +557,9 @@ class ZoomVideoDialog(_ExportDialogBase):
                                  width=W, height=H, supersample=int(self.ss.currentText()),
                                  hold_seconds=self.hold.value(),
                                  cycle_colors=self.cycle.isChecked(),
-                                 cycle_speed=self.cycle_speed.value(), png_dir=png_dir,
-                                 crf=self.crf.value())
+                                 cycle_speed=self.cycle_speed.value() *
+                                             (-1.0 if cs.cycle_reverse else 1.0),
+                                 png_dir=png_dir, crf=self.crf.value())
 
     def _update_info(self):
         s = self._spec()
@@ -503,6 +593,22 @@ class ZoomVideoDialog(_ExportDialogBase):
             return None
         return lambda cancel, progress: vid.render_zoom_video(
             spec, settings, palette, cs, path, progress=progress, cancel=cancel)
+
+    def _make_preview_job(self):
+        settings, view, palette, cs = self.args
+        spec = self._spec()
+        pw = PREVIEW_WIDTH
+        ph = max(2, int(round(spec.height * pw / spec.width / 2)) * 2)
+        pspec = dataclasses.replace(spec, width=pw, height=ph, fps=PREVIEW_FPS,
+                                    supersample=1, png_dir=None,
+                                    hold_seconds=min(spec.hold_seconds, 0.5))
+
+        def job(cancel, progress):
+            col = vid.FrameCollector()
+            ok = vid.render_zoom_video(pspec, settings, palette, cs, "",
+                                       progress=progress, cancel=cancel, writer=col)
+            return col.frames if ok else False
+        return job
 
 
 # ============================================================================= julia morph video
@@ -557,7 +663,7 @@ class JuliaMorphDialog(_ExportDialogBase):
         if p:
             self.path.setText(p)
 
-    def _make_job(self):
+    def _build_spec(self):
         settings, view, palette, cs = self.args
         kinds = {0: "circle", 1: "spiral", 2: "line"}
         W, H = vid.RESOLUTIONS[self.res.currentText()]
@@ -572,7 +678,7 @@ class JuliaMorphDialog(_ExportDialogBase):
             png_dir = os.path.splitext(self.path.text())[0] + "_frames"
         home_view = eng.ViewState(view.center, settings.formula.default_span) \
             if self.combine_zoom.isChecked() else view
-        spec = vid.JuliaMorphSpec(
+        return vid.JuliaMorphSpec(
             c0=c0, path=kinds[self.path_kind.currentIndex()],
             radius=self.radius.value(), turns=self.turns.value(), c1=c1,
             there_and_back=self.roundtrip.isChecked(),
@@ -580,10 +686,33 @@ class JuliaMorphDialog(_ExportDialogBase):
             width=W, height=H, supersample=int(self.ss.currentText()),
             view=home_view,
             zoom_end_span=view.span if self.combine_zoom.isChecked() else None,
-            cycle_colors=self.cycle.isChecked(), cycle_speed=cs.cycle_speed,
+            cycle_colors=self.cycle.isChecked(),
+            cycle_speed=cs.cycle_speed * (-1.0 if cs.cycle_reverse else 1.0),
             png_dir=png_dir)
+
+    def _make_job(self):
+        settings, view, palette, cs = self.args
+        spec = self._build_spec()
         path = self.path.text()
-        if not path:
+        if spec is None or not path:
             return None
         return lambda cancel, progress: vid.render_julia_morph_video(
             spec, settings, palette, cs, path, progress=progress, cancel=cancel)
+
+    def _make_preview_job(self):
+        settings, view, palette, cs = self.args
+        spec = self._build_spec()
+        if spec is None:
+            return None
+        pw = PREVIEW_WIDTH
+        ph = max(2, int(round(spec.height * pw / spec.width / 2)) * 2)
+        pspec = dataclasses.replace(spec, width=pw, height=ph, fps=PREVIEW_FPS,
+                                    supersample=1, png_dir=None)
+
+        def job(cancel, progress):
+            col = vid.FrameCollector()
+            ok = vid.render_julia_morph_video(pspec, settings, palette, cs, "",
+                                              progress=progress, cancel=cancel,
+                                              writer=col)
+            return col.frames if ok else False
+        return job

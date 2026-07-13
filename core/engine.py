@@ -67,6 +67,7 @@ class ColorSettings:
     offset: float = 0.0         # cycling offset (indices)
     log_mode: bool = False      # compress deep-zoom iteration ranges
     cycle_speed: float = 40.0   # indices/second when cycling animation is on
+    cycle_reverse: bool = False # cycle colors in the opposite direction
 
 
 @dataclass
@@ -269,7 +270,7 @@ def location_to_dict(settings: RenderSettings, view: ViewState, palette: Palette
         "julia_c_re": settings.julia_c.real,
         "julia_c_im": settings.julia_c.imag,
         "color": {"density": cs.density, "offset": cs.offset, "log_mode": cs.log_mode,
-                  "cycle_speed": cs.cycle_speed},
+                  "cycle_speed": cs.cycle_speed, "cycle_reverse": cs.cycle_reverse},
         "palette": palette.to_json(),
     }
     if settings.mode == "newton":
@@ -307,7 +308,8 @@ def location_from_dict(d: dict) -> Tuple[RenderSettings, ViewState, Palette, Col
     pal = Palette.from_json(d["palette"]) if "palette" in d else Palette()
     c = d.get("color", {})
     cs = ColorSettings(c.get("density", 4.0), c.get("offset", 0.0),
-                       c.get("log_mode", False), c.get("cycle_speed", 40.0))
+                       c.get("log_mode", False), c.get("cycle_speed", 40.0),
+                       c.get("cycle_reverse", False))
     return s, view, pal, cs
 
 

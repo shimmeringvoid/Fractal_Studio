@@ -114,6 +114,20 @@ def _smoothstep(t: float) -> float:
 
 # ----------------------------------------------------------------------------- writer
 
+class FrameCollector:
+    """Writer-compatible sink that keeps frames in memory (for in-app previews,
+    which deliberately avoid video files and system codecs entirely)."""
+
+    def __init__(self):
+        self.frames: list = []
+
+    def add(self, frame):
+        self.frames.append(frame)
+
+    def close(self):
+        pass
+
+
 class _Writer:
     """H.264 writer.
 
@@ -153,11 +167,13 @@ class _Writer:
 def render_zoom_video(spec: ZoomVideoSpec, settings: RenderSettings, palette: Palette,
                       cs: ColorSettings, out_path: str,
                       progress: Optional[Callable[[float, str], None]] = None,
-                      cancel: Optional[CancelToken] = None) -> bool:
-    """Render a zoom-in video ending at spec.end_view. Returns False if cancelled."""
+                      cancel: Optional[CancelToken] = None, writer=None) -> bool:
+    """Render a zoom-in video ending at spec.end_view. Returns False if cancelled.
+    Pass a FrameCollector as `writer` to render in memory instead of to a file."""
     n = spec.n_zoom_frames()
     per_frame = spec.rate_per_sec ** (1.0 / spec.fps)
-    writer = _Writer(out_path, spec.fps, spec.png_dir, spec.crf, spec.preset)
+    if writer is None:
+        writer = _Writer(out_path, spec.fps, spec.png_dir, spec.crf, spec.preset)
     base_offset = cs.offset
     try:
         last = None
@@ -191,10 +207,12 @@ def render_zoom_video(spec: ZoomVideoSpec, settings: RenderSettings, palette: Pa
 def render_julia_morph_video(spec: JuliaMorphSpec, settings: RenderSettings,
                              palette: Palette, cs: ColorSettings, out_path: str,
                              progress: Optional[Callable[[float, str], None]] = None,
-                             cancel: Optional[CancelToken] = None) -> bool:
-    """Render a Julia morph (optionally combined with a zoom)."""
+                             cancel: Optional[CancelToken] = None, writer=None) -> bool:
+    """Render a Julia morph (optionally combined with a zoom).
+    Pass a FrameCollector as `writer` to render in memory instead of to a file."""
     n = spec.n_frames()
-    writer = _Writer(out_path, spec.fps, spec.png_dir, spec.crf, spec.preset)
+    if writer is None:
+        writer = _Writer(out_path, spec.fps, spec.png_dir, spec.crf, spec.preset)
     base_offset = cs.offset
     span0 = spec.view.span
     span1 = spec.zoom_end_span if spec.zoom_end_span else span0
