@@ -21,13 +21,18 @@ later in an editor), eventually with a DeepDream frame filter (below).
 
 ## Machines
 
-* Laptop (working daily driver): System76, Ubuntu 18.04.6, glibc 2.27,
-  i7-9750H (6c/12t), 62.5 GiB RAM, GTX 1650 (Turing, sm_75), GNOME 3.28, X11.
-* Workstation (render farm, not yet set up): 4x NVIDIA Titan X, ~16 CPU cores,
-  large RAM. Ubuntu version unknown — run `lsb_release -a`, `ldd --version`,
-  and `nvidia-smi` first. NOTE: "Titan X" is ambiguous — Maxwell (sm_52) vs
-  Titan X Pascal (sm_61). This matters for PyTorch binary support; check
-  before choosing versions.
+* "monster" -- the render workstation: i7-5930K (6c/12t @ 3.5 GHz, 2014-era),
+  64 GiB RAM, 8 TB disk, 4x NVIDIA GTX TITAN X (GM200 = MAXWELL, sm_52,
+  12 GB each), Ubuntu 22.04.5, GNOME 42.9, X11. Modern glibc; conda env
+  solves unpinned. IMPORTANT: until the CUDA render path exists, monster's
+  CPU rendering is NO faster than the laptops (same 12 threads, older
+  cores) -- the 4 GPUs are the entire point of this machine. Maxwell
+  confirmed => numba-CUDA must target a toolkit the installed driver
+  supports; recent PyTorch binaries may lack sm_52. MEASURED 2026-07-14: driver 535.183.01, CUDA ceiling 12.2, all 4 GPUs healthy and idle. DECISION: use CUDA toolkit 11.8 for numba (full sm_52 support; CUDA 12 deprecates Maxwell, CUDA 13 removes it).
+* System76 laptop: Ubuntu 18.04.6, glibc 2.27 (the reason for landmine 1),
+  i7-9750H (6c/12t), 62.5 GiB RAM, GTX 1650 (Turing, sm_75), GNOME 3.28.
+* Newer laptop: Ubuntu 22.04.4, same conda env; its default GNOME Videos
+  mis-renders high-bitrate H.264 (gray + squeezed) -- mpv is the fix.
 
 ## Hard-won landmines (do not re-learn these)
 
