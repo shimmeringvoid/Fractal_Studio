@@ -497,6 +497,47 @@ def render_escape_frame_gpu(formula: EscapeFormula, xmin: float, ymin: float,
     return out
 
 
+# f32<->f64 handoff for zoom VIDEO. A hard switch at one frame would pop (the
+# two kernels differ slightly), so a zoom crossing the handoff crossfades over a
+# span-space band: pure GPU-f32 above HI, pure CPU-f64 below LO, a blend of both
+# in between. The band sits safely ABOVE _F32_MIN_SPAN so f32 is still valid
+# everywhere it's rendered here. escape_precision_plan() returns the mix; the
+# blend of the two colorized frames happens in engine.render_frame_blended.
+_HANDOFF_SPAN_HI = 5e-4     # >= this: pure f32
+_HANDOFF_SPAN_LO = 1.5e-4   # <= this: pure cpu-f64; band is (LO, HI)
+
+
+def resolve_escape_precision(span: float, precision: str = "auto") -> str:
+    """Concrete path ('f32' | 'f64' | 'cpu') that `precision` resolves to.
+
+    'auto' -> GPU 'f32' when the view is shallow enough for float32 to resolve
+    pixels (span >= _F32_MIN_SPAN), else 'cpu' (on Maxwell the GPU float64 path
+    is slower than the CPU, so deep frames go to the CPU, not GPU-f64). Forced
+    'f32'/'f64' degrade to 'cpu' when no GPU is present."""
+    if precision == "cpu":
+        return "cpu"
+    if precision in ("f32", "f64"):
+        return precision if cuda_available() else "cpu"
+    if precision != "auto":
+        raise ValueError(f"unknown precision {precision!r}")
+    if not cuda_available():
+        return "cpu"
+    return "f32" if span >= _F32_MIN_SPAN else "cpu"
+
+
+def escape_precision_plan(span: float) -> List[Tuple[str, float]]:
+    """Render plan for one zoom frame at `span`: a list of (precision, weight)
+    with weights summing to 1. One entry outside the handoff band; two (f32 and
+    cpu) inside it, so the video pipeline can crossfade and avoid a switch pop."""
+    if not cuda_available() or span <= _HANDOFF_SPAN_LO:
+        return [("cpu", 1.0)]
+    if span >= _HANDOFF_SPAN_HI:
+        return [("f32", 1.0)]
+    t = (_HANDOFF_SPAN_HI - span) / (_HANDOFF_SPAN_HI - _HANDOFF_SPAN_LO)
+    w = t * t * (3.0 - 2.0 * t)          # smoothstep: eased crossfade weight
+    return [("f32", 1.0 - w), ("cpu", w)]
+
+
 def render_escape_frame(formula: EscapeFormula, xmin: float, ymin: float,
                         dx: float, dy: float, width: int, height: int,
                         julia: bool, c: complex, max_iter: int,
@@ -506,10 +547,8 @@ def render_escape_frame(formula: EscapeFormula, xmin: float, ymin: float,
     """Render a full frame, preferring the GPU with automatic CPU fallback.
 
     precision:
-      'auto' -- GPU float32 when the view is shallow enough for float32 to
-                resolve pixels (span >= _F32_MIN_SPAN); otherwise the CPU
-                float64 kernel (on Maxwell the GPU float64 path is slower than
-                the CPU, so deep frames go to the CPU, not the GPU).
+      'auto' -- GPU float32 when shallow enough (span >= _F32_MIN_SPAN), else
+                the CPU float64 kernel. See resolve_escape_precision.
       'f32' / 'f64' -- force GPU at that precision (still CPU-fallback on error).
       'cpu' -- force the CPU kernel.
 
@@ -520,21 +559,12 @@ def render_escape_frame(formula: EscapeFormula, xmin: float, ymin: float,
     if out is None:
         out = np.empty((height, width), dtype=np.float32)
 
-    span = dx * width
-    if precision == "auto":
-        gpu_prec = "f32" if span >= _F32_MIN_SPAN else None  # None -> CPU
-    elif precision in ("f32", "f64"):
-        gpu_prec = precision
-    elif precision == "cpu":
-        gpu_prec = None
-    else:
-        raise ValueError(f"unknown precision {precision!r}")
-
-    if gpu_prec is not None and prefer_gpu and cuda_available():
+    resolved = resolve_escape_precision(dx * width, precision)
+    if resolved in ("f32", "f64") and prefer_gpu and cuda_available():
         try:
             return render_escape_frame_gpu(formula, xmin, ymin, dx, dy,
                                            width, height, julia, c, max_iter,
-                                           precision=gpu_prec, out=out)
+                                           precision=resolved, out=out)
         except Exception as e:                       # pragma: no cover
             _CUDA_DISABLED = True
             warnings.warn(f"CUDA render failed ({e!r}); falling back to CPU "

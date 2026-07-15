@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(nvidia-smi)",
+      "Bash(conda env *)",
+      "Bash(python -c \"import sys; print\\(sys.version\\)\")",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git push *)"
+    ]
+  }
+}

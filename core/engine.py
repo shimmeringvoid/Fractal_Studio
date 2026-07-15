@@ -17,7 +17,9 @@ from typing import Callable, Optional, Tuple
 import numpy as np
 
 from .formulas import (EscapeFormula, NewtonFormula, PRESETS, NEWTON_PRESETS,
-                       render_escape_strip, render_newton_strip)
+                       cuda_available, escape_precision_plan, render_escape_frame,
+                       render_escape_strip, render_newton_strip,
+                       resolve_escape_precision)
 from .palette import Palette
 
 FLOAT64_MIN_PIXEL = 5e-17     # ~10^13 magnification limit before float64 pixelates
@@ -159,9 +161,16 @@ def render_field(settings: RenderSettings, view: ViewState, width: int, height: 
                  supersample: int = 1,
                  progress: Optional[Callable[[float], None]] = None,
                  cancel: Optional[CancelToken] = None,
-                 strip_rows: int = 64) -> Optional[RenderResult]:
+                 strip_rows: int = 64,
+                 precision: str = "auto") -> Optional[RenderResult]:
     """Render the nu field (and root ids for newton) at width*ss x height*ss.
-    Returns None if cancelled. Strips give progress + cancellation points."""
+    Returns None if cancelled.
+
+    Escape mode uses the GPU (render_escape_frame) whenever `precision` resolves
+    to a GPU path -- a whole-frame one-shot, which on the GPU is faster than any
+    per-strip progress would be worth. When it resolves to the CPU (deep zoom, or
+    no GPU) it falls back to the strip loop, which keeps per-strip progress and
+    cancellation. Newton always uses the CPU strip loop."""
     ss = max(1, int(supersample))
     W, H = width * ss, height * ss
     dx = view.span / W
@@ -172,21 +181,32 @@ def render_field(settings: RenderSettings, view: ViewState, width: int, height: 
     nu = np.empty((H, W), dtype=np.float32)
     root = np.empty((H, W), dtype=np.int16) if settings.mode == "newton" else None
 
-    y = 0
-    while y < H:
+    use_gpu = (settings.mode == "escape"
+               and resolve_escape_precision(view.span, precision) in ("f32", "f64"))
+    if use_gpu:
         if cancel is not None and cancel.cancelled:
             return None
-        y1 = min(H, y + strip_rows * ss)
-        if settings.mode == "newton":
-            render_newton_strip(settings.newton, xmin, ymin, dx, dx, W, y, y1,
-                                max_iter, root[y:y1], nu[y:y1])
-        else:
-            julia = settings.plane == "julia"
-            render_escape_strip(settings.formula, xmin, ymin, dx, dx, W, y, y1,
-                                julia, settings.julia_c, max_iter, nu[y:y1])
-        y = y1
+        render_escape_frame(settings.formula, xmin, ymin, dx, dx, W, H,
+                            settings.plane == "julia", settings.julia_c, max_iter,
+                            precision=precision, out=nu)
         if progress is not None:
-            progress(y / H)
+            progress(1.0)
+    else:
+        y = 0
+        while y < H:
+            if cancel is not None and cancel.cancelled:
+                return None
+            y1 = min(H, y + strip_rows * ss)
+            if settings.mode == "newton":
+                render_newton_strip(settings.newton, xmin, ymin, dx, dx, W, y, y1,
+                                    max_iter, root[y:y1], nu[y:y1])
+            else:
+                julia = settings.plane == "julia"
+                render_escape_strip(settings.formula, xmin, ymin, dx, dx, W, y, y1,
+                                    julia, settings.julia_c, max_iter, nu[y:y1])
+            y = y1
+            if progress is not None:
+                progress(y / H)
 
     # kernels index rows bottom-up in imag; flip so row 0 is the top of the image
     nu = nu[::-1].copy()
@@ -213,8 +233,13 @@ def render_highres_tiled(settings: RenderSettings, view: ViewState, palette: Pal
                          cs: ColorSettings, width: int, height: int, supersample: int = 2,
                          progress: Optional[Callable[[float], None]] = None,
                          cancel: Optional[CancelToken] = None,
-                         tile_rows: int = 256) -> Optional[np.ndarray]:
-    """Arbitrary-resolution still, rendered in horizontal bands to bound memory."""
+                         tile_rows: int = 256, precision: str = "auto") -> Optional[np.ndarray]:
+    """Arbitrary-resolution still, rendered in horizontal bands to bound memory.
+
+    Escape bands go through render_escape_frame (GPU per `precision`, else CPU);
+    Newton bands stay on the CPU. `precision` is forced verbatim per band, so the
+    caller can render a whole frame at a fixed precision (the video crossfade in
+    render_frame_blended relies on this)."""
     ss = max(1, int(supersample))
     W, H = width * ss, height * ss
     dx = view.span / W
@@ -238,8 +263,9 @@ def render_highres_tiled(settings: RenderSettings, view: ViewState, palette: Pal
             render_newton_strip(settings.newton, xmin, band_ymin, dx, dx, W, 0, Hs,
                                 max_iter, root, nu)
         else:
-            render_escape_strip(settings.formula, xmin, band_ymin, dx, dx, W, 0, Hs,
-                                settings.plane == "julia", settings.julia_c, max_iter, nu)
+            render_escape_frame(settings.formula, xmin, band_ymin, dx, dx, W, Hs,
+                                settings.plane == "julia", settings.julia_c, max_iter,
+                                precision=precision, out=nu)
         res = RenderResult(settings.mode, nu[::-1].copy(),
                            root[::-1].copy() if root is not None else None,
                            settings.newton.n_roots() if settings.mode == "newton" else 0,
@@ -250,6 +276,33 @@ def render_highres_tiled(settings: RenderSettings, view: ViewState, palette: Pal
         if progress is not None:
             progress(done / height)
     return out
+
+
+def render_frame_blended(settings: RenderSettings, view: ViewState, palette: Palette,
+                         cs: ColorSettings, width: int, height: int, supersample: int = 2,
+                         cancel: Optional[CancelToken] = None) -> Optional[np.ndarray]:
+    """One colorized video frame, crossfading the f32->f64 precision handoff.
+
+    Outside the handoff band (or in Newton mode) this is a single
+    render_highres_tiled at the auto-resolved precision. Inside the band it
+    renders the frame at BOTH f32 and cpu-f64 and alpha-blends the colorized
+    RGB by escape_precision_plan's weights, so a zoom crossing the handoff fades
+    between the two precisions over many frames instead of popping on one."""
+    if settings.mode != "escape":
+        return render_highres_tiled(settings, view, palette, cs, width, height,
+                                    supersample, cancel=cancel)
+    plan = escape_precision_plan(view.span)
+    if len(plan) == 1:
+        return render_highres_tiled(settings, view, palette, cs, width, height,
+                                    supersample, cancel=cancel, precision=plan[0][0])
+    acc = np.zeros((height, width, 3), dtype=np.float32)
+    for prec, w in plan:
+        rgb = render_highres_tiled(settings, view, palette, cs, width, height,
+                                   supersample, cancel=cancel, precision=prec)
+        if rgb is None:
+            return None
+        acc += w * rgb.astype(np.float32)
+    return np.clip(acc + 0.5, 0, 255).astype(np.uint8)
 
 
 # ----------------------------------------------------------------------------- location files

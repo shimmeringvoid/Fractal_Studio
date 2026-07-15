@@ -73,15 +73,51 @@ iter) because `exp` blows the orbit up near the 1e4 bailout where float32 is
 coarse; topology is still right (boundary flips 0.12%). Prefer float64/CPU for
 `exp`-type formulas if exact smooth shading matters.
 
+## Engine / video integration (done)
+
+The GPU path is now wired through the whole app, all via `precision='auto'`:
+
+* `engine.render_field` (interactive window + fast preview) -- escape mode does a
+  whole-frame GPU render when `auto` resolves to a GPU path (shallow), and falls
+  back to the CPU strip loop (with per-strip progress + cancel) when it resolves
+  to CPU (deep zoom, or no GPU). Newton stays on the CPU.
+* `engine.render_highres_tiled` (stills, video frames) -- each memory-bounding
+  band now goes through `render_escape_frame` at the requested precision.
+* `engine.render_frame_blended` (video frames) -- see handoff below.
+* `video.render_zoom_video` / `render_julia_morph_video` use `render_frame_blended`.
+
+Verified with a spy on `render_escape_frame_gpu`: the interactive window's two
+`render_field` passes and every in-app zoom-Preview frame hit GPU-f32; a deep
+(span 1e-6) interactive view makes 0 GPU calls (CPU strip, as intended).
+
+## Pop-free f32 -> f64 zoom handoff
+
+A zoom video crosses from GPU-f32 (shallow) to CPU-f64 (deep). The two kernels
+differ, so switching precision on a single frame pops. `escape_precision_plan`
+defines a span-space crossfade band -- pure f32 above `_HANDOFF_SPAN_HI` (5e-4),
+pure cpu-f64 below `_HANDOFF_SPAN_LO` (1.5e-4, safely above the 1e-4 f32 floor),
+and a smoothstep blend of BOTH between. `render_frame_blended` renders the band
+frames at both precisions and alpha-blends the colorized RGB by those weights.
+Band edges are continuous (weight 0 at HI = pure f32, weight 1 at LO = pure cpu).
+
+Proof (`scripts/cuda_handoff_test.py`), isolating precision from zoom motion by
+measuring `D(span) = mean|f32 - cpu|` at a fixed view (0-255 scale):
+
+* `D` is real and would-be-visible: 16-35 gray levels across the band, ~25 at
+  the naive hard-switch span (1e-4) -- a ~10% one-frame flash.
+* Over a 2x/s zoom the band spans ~47 frames. Worst single-frame precision step:
+  **hard switch 25.2  vs  crossfade 0.98** (0-255) -- the crossfade is 26x
+  smaller, far below perceptual threshold. `--clip out.mp4` renders a real
+  test clip crossing the handoff.
+
+Cost: band frames render twice (f32 fast + cpu-f64 ~1.3s/4K), a one-time ~1min
+for a deep zoom. Outside the band and for stills there is no extra render.
+
 ## Not done yet (next steps)
 
-* **Wire the GPU path into `core/engine.py` / `core/video.py`.** The kernel and
-  fallback exist and are tested, but `render_field` still uses the CPU strip
-  kernel. The clean integration: full-frame GPU render for video frames and
-  stills (respecting `auto` precision), keeping the CPU strip path for the
-  interactive progressive/cancellable preview.
 * **Shard frame batches across the 4 GPUs** (one CUDA context / worker per GPU)
-  -- the ~250x projection above.
+  -- the ~250x projection above. Frames are independent; the current path uses
+  one GPU.
 * **Newton kernel CUDA twin** (same pattern; lower priority).
 * Optional: perturbation/double-double for deep zoom on the GPU, to lift the
-  float32 depth cap.
+  float32 depth cap (currently deep zooms render on the CPU).

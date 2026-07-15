@@ -103,9 +103,22 @@ literals cast, else numba promotes to complex128/FP64). float32 caps usable
 zoom at ~span>1e-4; render_escape_frame's 'auto' mode uses GPU-f32 when shallow,
 CPU-f64 when deep. CPU fallback is automatic on any GPU error.
 
-STILL TODO: wire the GPU path into engine.py/video.py (kernels exist but
-render_field still calls the CPU strip kernel); shard frames across the 4 GPUs;
-Newton CUDA twin. The GTX 1650 laptop (sm_75) can be the dev/test GPU.
+INTEGRATED (2026-07-14): the GPU path now runs through the whole app via
+precision='auto'. engine.render_field (interactive window + preview) does a
+whole-frame GPU render when shallow, CPU strip loop (progress+cancel) when deep;
+render_highres_tiled (stills/video) renders each band via render_escape_frame;
+video.py renders frames via engine.render_frame_blended. Spy-verified: the
+interactive window and in-app zoom Preview both hit GPU-f32; deep views use CPU.
+
+ZOOM HANDOFF (no pop): a zoom crossing f32->f64 would pop on a hard switch (the
+kernels differ by ~25/255 gray levels, a ~10% flash). escape_precision_plan
+defines a span-space crossfade band [1.5e-4, 5e-4] and render_frame_blended
+alpha-blends the f32 and cpu-f64 frames across it, cutting the worst per-frame
+precision step ~26x (to <1/255), below perception. Proof + test clip:
+scripts/cuda_handoff_test.py (--clip). Details in docs/workstreamA_bench.md.
+
+STILL TODO: shard frames across the 4 GPUs (currently one GPU); Newton CUDA
+twin. The GTX 1650 laptop (sm_75) can be the dev/test GPU.
 
 ## Workstream B: DeepDream video filter — SEPARATE REPO
 

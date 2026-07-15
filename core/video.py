@@ -27,7 +27,7 @@ import imageio.v2 as imageio
 import numpy as np
 
 from .engine import (CancelToken, ColorSettings, RenderSettings, ViewState,
-                     render_highres_tiled)
+                     render_frame_blended)
 from .palette import Palette
 
 RESOLUTIONS = {
@@ -187,7 +187,7 @@ def render_zoom_video(spec: ZoomVideoSpec, settings: RenderSettings, palette: Pa
                                 base_offset + (spec.cycle_speed * k / spec.fps
                                                if spec.cycle_colors else 0.0),
                                 cs.log_mode, cs.cycle_speed)
-            frame = render_highres_tiled(settings, view, palette, fcs,
+            frame = render_frame_blended(settings, view, palette, fcs,
                                          spec.width, spec.height, spec.supersample,
                                          cancel=cancel)
             if frame is None:
@@ -231,7 +231,7 @@ def render_julia_morph_video(spec: JuliaMorphSpec, settings: RenderSettings,
                                 base_offset + (spec.cycle_speed * k / spec.fps
                                                if spec.cycle_colors else 0.0),
                                 cs.log_mode, cs.cycle_speed)
-            frame = render_highres_tiled(s, view, palette, fcs,
+            frame = render_frame_blended(s, view, palette, fcs,
                                          spec.width, spec.height, spec.supersample,
                                          cancel=cancel)
             if frame is None:
