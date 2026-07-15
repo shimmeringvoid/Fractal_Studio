@@ -88,13 +88,24 @@ Workstation not yet cloned/set up.
 
 ## Workstream A (top priority): CUDA rendering
 
-Numba CPU kernels are the current bottleneck for 4K supersampled video.
-Plan: generate `numba.cuda` twins of the escape-time kernel in
-core/formulas.py (same codegen pattern), auto-fallback to CPU, then shard
-frame batches across the 4 GPUs (frames are embarrassingly parallel).
-Newton kernel can follow. Verify Numba CUDA support for the Titans'
-compute capability; Maxwell needs CUDA <= 11.x toolchains — pin accordingly.
-The GTX 1650 laptop (sm_75) can be the dev/test GPU.
+DONE (2026-07-14): escape-time `numba.cuda` twin built, verified, benchmarked
+on monster. See `core/formulas.py` (render_escape_frame / *_gpu,
+cuda_available), `scripts/cuda_verify_bench.py`, and `docs/workstreamA_bench.md`.
+Toolchain: conda `cudatoolkit=11.8` pinned in environment.yml (numba prefers it
+over system CUDA 12.1; full sm_52).
+
+KEY FINDING — Maxwell FP64 is 1/32 of FP32, so a float64 GPU port is *slower*
+than the CPU (0.31x on a 4K frame). The **float32** path is 62x/GPU (~250x
+across 4 GPUs projected) and is the only reason to use these cards. The twin
+therefore generates two kernels: 'f64' (bit-faithful to the CPU except a sparse
+boundary set) and 'f32' (fast; formula AST rewritten so complex `**`->`*` and
+literals cast, else numba promotes to complex128/FP64). float32 caps usable
+zoom at ~span>1e-4; render_escape_frame's 'auto' mode uses GPU-f32 when shallow,
+CPU-f64 when deep. CPU fallback is automatic on any GPU error.
+
+STILL TODO: wire the GPU path into engine.py/video.py (kernels exist but
+render_field still calls the CPU strip kernel); shard frames across the 4 GPUs;
+Newton CUDA twin. The GTX 1650 laptop (sm_75) can be the dev/test GPU.
 
 ## Workstream B: DeepDream video filter — SEPARATE REPO
 

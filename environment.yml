@@ -12,7 +12,11 @@ channels:
 dependencies:
   - python=3.12          # version the app was tested against
   - numpy
-  - numba                # parallel CPU kernels (JIT)
+  - numba                # parallel CPU kernels + numba.cuda GPU kernels (JIT)
+  - cudatoolkit=11.8     # numba CUDA toolchain. 11.8 = full Maxwell (sm_52,
+                         # the GTX TITAN X) support; CUDA 12 deprecates Maxwell
+                         # and 13 removes it. numba prefers this over any system
+                         # CUDA. See docs/workstreamA_bench.md, CLAUDE.md.
   - pyside6>=6.6         # GUI -- conda-forge build, glibc-2.17 compatible
   - imageio
   - pillow
