@@ -113,11 +113,61 @@ measuring `D(span) = mean|f32 - cpu|` at a fixed view (0-255 scale):
 Cost: band frames render twice (f32 fast + cpu-f64 ~1.3s/4K), a one-time ~1min
 for a deep zoom. Outside the band and for stills there is no extra render.
 
+## Sharded producer/consumer video pipeline (done)
+
+`video.render_zoom_video` / `render_julia_morph_video` now render frames across
+a pool of worker threads and encode them in order (`_pipeline_frames`):
+
+* one worker per GPU (`cuda.select_device`), so their GPU renders shard across
+  the 4 Titans while their CPU colorize/downsample/f64 work overlaps on cores;
+* a single consumer appends to the ffmpeg writer strictly in frame order;
+* a bounded look-ahead (semaphore, 2x workers) gives backpressure -- it caps
+  memory and lets a run of slow crossfade-band frames (each needs a CPU-f64
+  render) be worked on by several threads at once instead of stalling the
+  encoder; the consumer just waits for the next index while the buffer fills;
+* **PNG frames are written in the workers** (numbered by index, so
+  order-independent) -- they must not sit in the single consumer, which is
+  where they used to serialize.
+
+### Where the time actually goes (4K frame, measured)
+
+Not the encoder, as expected -- H.264 is trivial:
+
+| per-frame cost            | ss=1    | ss=2    |
+|---------------------------|---------|---------|
+| GPU-f32 render+colorize   | 0.26 s  | 3.94 s  |
+| crossfade band (f32+cpu)  | 2.06 s  | 10.3 s  |
+| deep CPU-f64 render       | 0.88 s  | 6.34 s  |
+| **H.264 encode**          | 0.016 s | 0.016 s |
+| **PNG write**             | 0.53 s  | 0.53 s  |
+
+The GPU made rendering so cheap that the cost moved to CPU-side colorize +
+downsample (dominant at ss=2), CPU-f64 for band/deep frames, and PNG writing.
+Thread-scaling of whole-frame production (4 workers, GPUs sharded): **3.9x** at
+ss=2 shallow (colorize parallelizes near-linearly), 2.2x at ss=1 shallow, 1.4x
+on the CPU-f64-saturated deep frames.
+
+### Before/after, real ~10s 4K clip (287 frames, crosses the band)
+
+Sequential (pre-pipeline) vs the 4-GPU pipeline, `scripts/cuda_pipeline_bench.py`
+(workers=1 vs 4):
+
+| output           | before   | after    | speedup |
+|------------------|----------|----------|---------|
+| MP4 only         | 159.3 s  | 106.1 s  | 1.50x   |
+| MP4 + PNG seq    | 267.8 s  | 136.1 s  | 1.97x   |
+
+Both MP4s are byte-identical (frames are deterministic across the 4 identical
+Titans). The MP4-only 1.50x is capped here because ss=1 colorize is small and
+the ~33 band frames are CPU-f64-bound; a default ss=2 render (colorize-heavy)
+parallelizes closer to the 3.9x above. The PNG win is the clearest: writing PNGs
+added +108s in the old serial consumer but only +30s in the pipeline (parallel
+workers), so PNG-sequence output nearly reaches 2x.
+
 ## Not done yet (next steps)
 
-* **Shard frame batches across the 4 GPUs** (one CUDA context / worker per GPU)
-  -- the ~250x projection above. Frames are independent; the current path uses
-  one GPU.
 * **Newton kernel CUDA twin** (same pattern; lower priority).
+* Move colorize + downsample onto the GPU -- now the dominant per-frame cost at
+  ss=2, and currently CPU numpy. Would compound with the pipeline.
 * Optional: perturbation/double-double for deep zoom on the GPU, to lift the
   float32 depth cap (currently deep zooms render on the CPU).

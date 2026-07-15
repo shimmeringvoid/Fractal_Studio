@@ -117,8 +117,19 @@ alpha-blends the f32 and cpu-f64 frames across it, cutting the worst per-frame
 precision step ~26x (to <1/255), below perception. Proof + test clip:
 scripts/cuda_handoff_test.py (--clip). Details in docs/workstreamA_bench.md.
 
-STILL TODO: shard frames across the 4 GPUs (currently one GPU); Newton CUDA
-twin. The GTX 1650 laptop (sm_75) can be the dev/test GPU.
+SHARDED PIPELINE (2026-07-14): video.py renders frames across a worker-thread
+pool (one per GPU via cuda.select_device) and encodes them in order on a single
+consumer (video._pipeline_frames), with bounded look-ahead backpressure so slow
+crossfade-band CPU-f64 frames don't stall the encoder. Measured (not expected!):
+H.264 encode is trivial (16ms/4K frame); the real cost is CPU-side
+colorize+downsample and CPU-f64 renders, plus PNG writing -- so PNGs are written
+in the workers (order-independent), not the consumer. Before/after on a ~10s 4K
+clip crossing the band: MP4 159s->106s (1.50x), MP4+PNG 268s->136s (1.97x); the
+per-frame colorize-heavy ss=2 case parallelizes ~3.9x. Bench:
+scripts/cuda_pipeline_bench.py. Details in docs/workstreamA_bench.md.
+
+STILL TODO: Newton CUDA twin; move colorize+downsample onto the GPU (now the
+dominant per-frame cost at ss=2). The GTX 1650 laptop (sm_75) is the dev/test GPU.
 
 ## Workstream B: DeepDream video filter — SEPARATE REPO
 

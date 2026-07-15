@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import math
 import os
+import threading
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
@@ -28,6 +29,7 @@ import numpy as np
 
 from .engine import (CancelToken, ColorSettings, RenderSettings, ViewState,
                      render_frame_blended)
+from .formulas import cuda_available
 from .palette import Palette
 
 RESOLUTIONS = {
@@ -129,7 +131,7 @@ class FrameCollector:
 
 
 class _Writer:
-    """H.264 writer.
+    """H.264 writer (MP4 only; PNG frames are written by the render pipeline).
 
     Fractal frames are maximum-entropy content (every pixel differs; palette
     cycling defeats temporal prediction), so a fixed quality scale produces
@@ -138,28 +140,133 @@ class _Writer:
     machines. Encode by CRF instead: it targets visual quality and lets the
     bitrate fall where it must. CRF 18 is visually transparent; 20-23 is
     smaller and still excellent.
+
+    add() must be called in frame order (a video stream is ordered); the
+    pipeline guarantees that from its single consumer.
     """
 
-    def __init__(self, path: str, fps: int, png_dir: Optional[str],
-                 crf: int = 20, preset: str = "slow"):
+    def __init__(self, path: str, fps: int, crf: int = 20, preset: str = "slow"):
         os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
         self.w = imageio.get_writer(
             path, fps=fps, codec="libx264", macro_block_size=8,
             pixelformat="yuv420p",
             output_params=["-crf", str(crf), "-preset", preset])
-        self.png_dir = png_dir
-        if png_dir:
-            os.makedirs(png_dir, exist_ok=True)
-        self.i = 0
 
     def add(self, frame: np.ndarray):
         self.w.append_data(frame)
-        if self.png_dir:
-            imageio.imwrite(os.path.join(self.png_dir, f"frame_{self.i:06d}.png"), frame)
-        self.i += 1
 
     def close(self):
         self.w.close()
+
+
+# ----------------------------------------------------------------------------- sharded pipeline
+
+def _default_workers() -> int:
+    """One worker per GPU (frames shard across the 4 Titans); a small CPU pool
+    otherwise. render_escape_frame's tiny GPU renders leave the workers mostly
+    doing CPU colorize/downsample, which parallelizes across cores."""
+    if cuda_available():
+        try:
+            from numba import cuda
+            return max(1, len(cuda.gpus))
+        except Exception:
+            pass
+    return min(4, (os.cpu_count() or 4))
+
+
+def _pipeline_frames(n: int, render_fn: Callable[[int], Optional[np.ndarray]],
+                     consume_fn: Callable[[int, np.ndarray], None],
+                     cancel: Optional[CancelToken], workers: int) -> bool:
+    """Render frames 0..n-1 in `workers` threads, consume them IN ORDER here.
+
+    Each worker thread is pinned to one GPU (cuda.select_device), so their GPU
+    renders shard across the 4 cards while their CPU colorize/downsample/f64
+    work overlaps across cores. A bounded look-ahead (semaphore) caps how far
+    producers run past the consumer -- backpressure that bounds memory and lets
+    slow crossfade-band frames (which need a CPU-f64 render) be worked on by
+    several threads at once instead of stalling the ordered encoder: the
+    consumer simply waits for the next index while the buffer fills behind it.
+
+    Returns True if all n frames were consumed, False if cancelled. A worker
+    exception is re-raised on the consumer thread."""
+    max_ahead = max(workers + 1, 2 * workers)
+    results: dict = {}
+    lock = threading.Lock()
+    ready = threading.Condition(lock)
+    slots = threading.Semaphore(max_ahead)
+    st = {"next": 0, "error": None}
+
+    ngpu = 0
+    if cuda_available():
+        try:
+            from numba import cuda
+            ngpu = len(cuda.gpus)
+        except Exception:
+            ngpu = 0
+
+    def cancelled():
+        return cancel is not None and cancel.cancelled
+
+    def producer(dev: int):
+        if ngpu:
+            try:
+                from numba import cuda
+                cuda.select_device(dev)
+            except Exception:
+                pass
+        while True:
+            slots.acquire()
+            if cancelled():
+                slots.release(); return
+            with lock:
+                if st["error"] is not None:
+                    slots.release(); return
+                k = st["next"]
+                if k >= n:
+                    slots.release(); return
+                st["next"] = k + 1
+            try:
+                frame = render_fn(k)
+            except BaseException as e:                       # pragma: no cover
+                with ready:
+                    if st["error"] is None:
+                        st["error"] = e
+                    ready.notify_all()
+                slots.release()
+                return
+            with ready:
+                results[k] = frame
+                ready.notify_all()
+
+    threads = [threading.Thread(target=producer, args=(i % max(ngpu, 1),),
+                                daemon=True, name=f"frameprod{i}")
+               for i in range(workers)]
+    for t in threads:
+        t.start()
+
+    consumed = 0
+    try:
+        for k in range(n):
+            with ready:
+                while (k not in results and st["error"] is None
+                       and not cancelled()):
+                    ready.wait(0.2)
+                if st["error"] is not None or cancelled():
+                    break
+                frame = results.pop(k)
+            if frame is None:            # render_fn saw a cancel mid-frame
+                break
+            consume_fn(k, frame)
+            consumed += 1
+            slots.release()              # free one look-ahead slot
+    finally:
+        for _ in range(workers):         # unblock any producers so they can exit
+            slots.release()
+        for t in threads:
+            t.join(timeout=5.0)
+    if st["error"] is not None:
+        raise st["error"]
+    return consumed == n
 
 
 # ----------------------------------------------------------------------------- renderers
@@ -167,39 +274,54 @@ class _Writer:
 def render_zoom_video(spec: ZoomVideoSpec, settings: RenderSettings, palette: Palette,
                       cs: ColorSettings, out_path: str,
                       progress: Optional[Callable[[float, str], None]] = None,
-                      cancel: Optional[CancelToken] = None, writer=None) -> bool:
+                      cancel: Optional[CancelToken] = None, writer=None,
+                      workers: Optional[int] = None) -> bool:
     """Render a zoom-in video ending at spec.end_view. Returns False if cancelled.
-    Pass a FrameCollector as `writer` to render in memory instead of to a file."""
+    Pass a FrameCollector as `writer` to render in memory instead of to a file.
+
+    Frames render in parallel across the GPUs (see _pipeline_frames) and are
+    encoded in order by the single consumer. PNG frames (order-independent) are
+    written in the worker threads so they don't bottleneck the consumer."""
     n = spec.n_zoom_frames()
     per_frame = spec.rate_per_sec ** (1.0 / spec.fps)
     if writer is None:
-        writer = _Writer(out_path, spec.fps, spec.png_dir, spec.crf, spec.preset)
+        writer = _Writer(out_path, spec.fps, spec.crf, spec.preset)
+    if spec.png_dir:
+        os.makedirs(spec.png_dir, exist_ok=True)
     base_offset = cs.offset
+    st = {"last": None}
+
+    def render_fn(k):
+        span = max(spec.start_span / (per_frame ** k), spec.end_view.span)
+        view = ViewState(spec.end_view.center, span)
+        fcs = ColorSettings(cs.density,
+                            base_offset + (spec.cycle_speed * k / spec.fps
+                                           if spec.cycle_colors else 0.0),
+                            cs.log_mode, cs.cycle_speed)
+        frame = render_frame_blended(settings, view, palette, fcs,
+                                     spec.width, spec.height, spec.supersample,
+                                     cancel=cancel)
+        if frame is not None and spec.png_dir:
+            imageio.imwrite(os.path.join(spec.png_dir, f"frame_{k:06d}.png"), frame)
+        return frame
+
+    def consume_fn(k, frame):
+        writer.add(frame)
+        st["last"] = frame
+        if progress is not None:
+            progress((k + 1) / n, f"frame {k + 1}/{n}")
+
     try:
-        last = None
-        for k in range(n):
-            if cancel is not None and cancel.cancelled:
-                return False
-            span = spec.start_span / (per_frame ** k)
-            span = max(span, spec.end_view.span)
-            view = ViewState(spec.end_view.center, span)
-            fcs = ColorSettings(cs.density,
-                                base_offset + (spec.cycle_speed * k / spec.fps
-                                               if spec.cycle_colors else 0.0),
-                                cs.log_mode, cs.cycle_speed)
-            frame = render_frame_blended(settings, view, palette, fcs,
-                                         spec.width, spec.height, spec.supersample,
-                                         cancel=cancel)
-            if frame is None:
-                return False
-            writer.add(frame)
-            last = frame
-            if progress is not None:
-                progress((k + 1) / n, f"frame {k + 1}/{n}  span={span:.3e}")
-        for _ in range(int(round(spec.hold_seconds * spec.fps))):
-            if last is not None:
-                writer.add(last)
-        return True
+        ok = _pipeline_frames(n, render_fn, consume_fn, cancel,
+                              workers or _default_workers())
+        if ok and st["last"] is not None:
+            for h in range(int(round(spec.hold_seconds * spec.fps))):
+                writer.add(st["last"])
+                if spec.png_dir:
+                    imageio.imwrite(
+                        os.path.join(spec.png_dir, f"frame_{n + h:06d}.png"),
+                        st["last"])
+        return ok
     finally:
         writer.close()
 
@@ -207,38 +329,45 @@ def render_zoom_video(spec: ZoomVideoSpec, settings: RenderSettings, palette: Pa
 def render_julia_morph_video(spec: JuliaMorphSpec, settings: RenderSettings,
                              palette: Palette, cs: ColorSettings, out_path: str,
                              progress: Optional[Callable[[float, str], None]] = None,
-                             cancel: Optional[CancelToken] = None, writer=None) -> bool:
+                             cancel: Optional[CancelToken] = None, writer=None,
+                             workers: Optional[int] = None) -> bool:
     """Render a Julia morph (optionally combined with a zoom).
     Pass a FrameCollector as `writer` to render in memory instead of to a file."""
     n = spec.n_frames()
     if writer is None:
-        writer = _Writer(out_path, spec.fps, spec.png_dir, spec.crf, spec.preset)
+        writer = _Writer(out_path, spec.fps, spec.crf, spec.preset)
+    if spec.png_dir:
+        os.makedirs(spec.png_dir, exist_ok=True)
     base_offset = cs.offset
     span0 = spec.view.span
     span1 = spec.zoom_end_span if spec.zoom_end_span else span0
+
+    def render_fn(k):
+        t = k / n                          # endpoint excluded -> seamless loops
+        s = RenderSettings(mode="escape", plane="julia",
+                           formula=settings.formula, newton=settings.newton,
+                           julia_c=spec.c_at(t), max_iter=settings.max_iter,
+                           auto_iter=settings.auto_iter)
+        span = span0 * (span1 / span0) ** _smoothstep(t) if span1 != span0 else span0
+        view = ViewState(spec.view.center, span)
+        fcs = ColorSettings(cs.density,
+                            base_offset + (spec.cycle_speed * k / spec.fps
+                                           if spec.cycle_colors else 0.0),
+                            cs.log_mode, cs.cycle_speed)
+        frame = render_frame_blended(s, view, palette, fcs,
+                                     spec.width, spec.height, spec.supersample,
+                                     cancel=cancel)
+        if frame is not None and spec.png_dir:
+            imageio.imwrite(os.path.join(spec.png_dir, f"frame_{k:06d}.png"), frame)
+        return frame
+
+    def consume_fn(k, frame):
+        writer.add(frame)
+        if progress is not None:
+            progress((k + 1) / n, f"frame {k + 1}/{n}")
+
     try:
-        for k in range(n):
-            if cancel is not None and cancel.cancelled:
-                return False
-            t = k / n                      # endpoint excluded -> seamless loops
-            s = RenderSettings(mode="escape", plane="julia",
-                               formula=settings.formula, newton=settings.newton,
-                               julia_c=spec.c_at(t), max_iter=settings.max_iter,
-                               auto_iter=settings.auto_iter)
-            span = span0 * (span1 / span0) ** _smoothstep(t) if span1 != span0 else span0
-            view = ViewState(spec.view.center, span)
-            fcs = ColorSettings(cs.density,
-                                base_offset + (spec.cycle_speed * k / spec.fps
-                                               if spec.cycle_colors else 0.0),
-                                cs.log_mode, cs.cycle_speed)
-            frame = render_frame_blended(s, view, palette, fcs,
-                                         spec.width, spec.height, spec.supersample,
-                                         cancel=cancel)
-            if frame is None:
-                return False
-            writer.add(frame)
-            if progress is not None:
-                progress((k + 1) / n, f"frame {k + 1}/{n}  c={s.julia_c:.6f}")
-        return True
+        return _pipeline_frames(n, render_fn, consume_fn, cancel,
+                                workers or _default_workers())
     finally:
         writer.close()
