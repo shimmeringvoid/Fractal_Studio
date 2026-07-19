@@ -1,16 +1,88 @@
 # Fractal Studio
 
-Interactive fractal explorer and video renderer. Python + PySide6 + Numba.
+![Julia set of exp(z) + c](docs/images/exp_julia_tendrils.png)
 
-Escape-time fractals (Mandelbrot, Julia, Burning Ship, Tricorn, and any custom
-formula f(z, c) you type), Newton multi-attractor basin fractals, 256-entry
-palettes (including sphere-in-RGB-cube path palettes), deep-dive navigation
-with bookmarks, high-resolution stills, 4K zoom-in videos, and Julia morph
-videos.
+Interactive fractal explorer and **GPU-accelerated** video renderer.
+Python + PySide6 + Numba (CPU and CUDA).
 
-## Install (Ubuntu)
+Explore escape-time fractals — Mandelbrot, Julia, Burning Ship, Tricorn, and
+any custom formula `f(z, c)` you type — plus Newton multi-attractor basin
+fractals. Dive to ~10^13 magnification with click-to-zoom navigation and
+bookmarks, then render high-resolution stills, smooth 4K zoom-in videos, and
+seamlessly looping Julia morph videos. On a machine with NVIDIA GPUs, frames
+render up to **62x faster per GPU** and shard across all available GPUs; on
+anything else, the same code runs on all CPU cores automatically.
 
-Recommended: conda (required on Ubuntu 18.04 -- see below).
+## Made with Fractal Studio
+
+Julia morph animations — the constant c traveling a small circle in the
+complex plane while the set writhes in response — scored with original
+sitar/sarod/tabla ragas (one with vocals):
+
+* https://youtu.be/RkQgGoY6Cek
+* https://youtu.be/VYpVeOAjovA
+* https://youtu.be/EOrAn7sN_io
+* https://youtu.be/PjE8xM07j_Q
+* https://youtu.be/b0IPI39v2ec
+
+The stills above and below are frames from an animation of the Julia set of
+**exp(z) + c** — the exponential family, whose Julia sets form "Cantor
+bouquets" of hair-like tendrils and reorganize dramatically as c moves.
+
+![Julia set of exp(z) + c, escape coloring](docs/images/exp_julia_color_bloom.png)
+
+## Features
+
+* **Fractal families**: escape-time presets (z^2+c through z^4+c, Burning
+  Ship, Tricorn, Lambda, Sine, Exponential), a free-text formula box —
+  expressions in `z` and `c` are validated by a whitelist AST parser and
+  JIT-compiled into parallel kernels — and Newton basins for any polynomial,
+  colored by attracting root with smooth convergence shading.
+* **GPU rendering** (NVIDIA, optional): CUDA twins of the escape-time kernels
+  with a float32 fast path, automatic `precision='auto'` selection, and
+  transparent CPU fallback. Deep views (span < 1e-4, where float32 runs out
+  of resolution) automatically use the CPU float64 path; a span-space
+  crossfade band makes the f32-to-f64 handoff invisible in zoom videos.
+* **Multi-GPU video pipeline**: frames shard across all GPUs through a
+  producer/consumer pipeline with in-order encoding, bounded memory, and
+  parallel PNG writing.
+* **Navigation**: click to zoom (recenters, default x10), shift-click to zoom
+  out, wheel zoom anchored under the cursor, drag to pan, history
+  back/forward, bookmarks, and right-click to open the Julia set of any point.
+* **Color**: smooth (fractional-iteration) coloring quantized onto 256-entry
+  palettes; palette sources include gradients, JSON files, and paths on the
+  sphere inscribed in the RGB cube (great circles and pole-to-pole spirals —
+  vivid colors that blend and wrap seamlessly). Live color density/offset,
+  log mapping for deep zooms, and palette cycling in either direction —
+  all recolor instantly from a cached iteration field, no re-render.
+* **Video**: 4K-default zoom videos specified as zoom-rate-per-second; Julia
+  morph videos along circle / spiral / line paths in c-space (circle paths
+  loop seamlessly), combinable with zooming; CRF quality control; optional
+  PNG frame sequences; render-time and file-size estimates *before* you
+  commit; and an **in-app low-res Preview** that loops the exact animation
+  path in seconds-to-minutes — no video file, no codecs — so you tune
+  parameters before the real render.
+* **Reproducibility**: bookmarks ("location" JSONs) store everything —
+  center at full float64 precision, formula, palette, color settings — and
+  every saved still gets a sidecar location file.
+
+## Performance
+
+Measured on 4x GTX TITAN X (Maxwell) + i7-5930K; 4K frame, Mandelbrot,
+max_iter=1000 (reproduce: `python scripts/cuda_verify_bench.py`):
+
+| path                     | time    | vs CPU |
+|--------------------------|---------|--------|
+| CPU float64 (12 threads) | 1.26 s  | 1.0x   |
+| GPU float32 (1 Titan X)  | 0.020 s | 62x    |
+
+End-to-end ~10 s 4K clip through the 4-GPU pipeline: 1.5x (MP4) to 2.0x
+(MP4 + PNG sequence) over single-GPU sequential — the render itself is no
+longer the bottleneck. Notably, on Maxwell a *float64* GPU port is slower
+than the CPU (FP64 runs at 1/32 FP32 rate); the float32 fast path required
+AST-level kernel specialization. Details: `docs/workstreamA_bench.md`.
+
+## Install
 
 ```bash
 conda env create -f environment.yml
@@ -18,105 +90,53 @@ conda activate fractal
 python main.py
 ```
 
-Or, on Ubuntu 20.04+ only, plain pip works too:
+The env includes `cudatoolkit=11.8` for the GPU path (chosen for full
+Maxwell/sm_52 support; works on newer GPUs too). No NVIDIA GPU? Everything
+still works — rendering falls back to Numba-parallel CPU automatically.
 
-```bash
-sudo apt install libegl1 libxkbcommon0        # Qt runtime libs (usually present)
-python3 -m venv venv && source venv/bin/activate
-pip install -r requirements.txt
-python3 main.py
-```
-
-ffmpeg is bundled via `imageio-ffmpeg`; nothing else to install.
-
-**Ubuntu 18.04 note.** The pip wheels of PySide6 >= 6.3 require glibc >= 2.28;
-18.04 has 2.27, so pip cannot install a working PySide6 there. conda-forge
-builds Qt6/PySide6 against a glibc 2.17 sysroot, so the conda environment
-above works on 18.04 (and anything newer). Just never `pip install pyside6`
-inside the env.
+Notes: PySide6 must come from conda-forge (as the env file does) — pip's
+PySide6 wheels require glibc >= 2.28 and fail on e.g. Ubuntu 18.04. A pip-only
+CPU install (`requirements.txt`) works on Ubuntu 20.04+ if you don't need GPU.
 
 ## Controls
 
 | Action | Effect |
 |---|---|
-| left-click | zoom in by the click factor (default ×10), centered on the point |
-| shift + left-click | zoom out by the same factor |
-| left-drag | pan |
-| scroll wheel | zoom ×1.5 per notch, anchored at the cursor |
+| left-click | zoom in (default x10), recentered on the point |
+| shift + left-click | zoom out |
+| left-drag / wheel | pan / zoom x1.5 anchored at cursor |
 | right-click | open the Julia set with c = clicked point |
-| `H` | home view · `Backspace` back · `Shift+Backspace` forward |
-| `Ctrl+B` | save bookmark · `Ctrl+S` high-res image · `Ctrl+L`/`Ctrl+O` save/load location |
-| `Ctrl+Shift+Z` | zoom-in video · `Ctrl+Shift+J` Julia morph video |
+| `H` / `Backspace` / `Shift+Backspace` | home / back / forward |
+| `Ctrl+B` / `Ctrl+S` | bookmark / high-res image |
+| `Ctrl+L` / `Ctrl+O` | save / load location |
+| `Ctrl+Shift+Z` / `Ctrl+Shift+J` | zoom video / Julia morph video |
 
-The first render of any formula pauses ~1–3 s while Numba JIT-compiles its
-kernel; after that it's cached for the session.
+First render of a new formula pauses a moment for JIT compilation, then it's
+cached for the session.
 
-## Concepts
+## Limits and roadmap
 
-**Smooth-iteration cache.** Kernels output a float32 fractional-iteration field.
-Palette choice, color density/offset, log mapping, and color cycling are applied
-after the fact, so all recolor instantly without re-rendering.
-
-**Palettes.** 256 entries, index 0 reserved for the interior (black by default).
-Smooth coloring is quantized onto the palette, so no banding. Sources: rainbow,
-gradient stops, JSON files, and *sphere paths* — great circles or pole-to-pole
-spirals on the sphere inscribed in the RGB cube (center (127.5)³, radius 127.5),
-sampled to 255 colors. Great circles close exactly, so they wrap seamlessly
-under mod-255 coloring and cycling. Edit via Palette → Edit…
-
-**Custom formulas.** Any expression in `z` and `c` with `+ - * / **` and
-`sin cos tan sinh cosh tanh exp log sqrt asin acos atan abs conj re im`.
-Validated with a whitelist AST parser, then compiled to a parallel Numba kernel.
-Example — Burning Ship is just `(abs(re(z)) + 1j*abs(im(z)))**2 + c`.
-
-**Newton basins.** Enter polynomial coefficients (highest degree first,
-complex allowed). Pixels are colored by which root they converge to — one
-palette band per attractor — shaded by smooth convergence speed.
-Non-converging points get index 0.
-
-**Locations.** A location JSON stores everything: center (full float64
-precision), span, formula, mode, iterations, palette, color settings.
-Bookmarks are location files in `locations/`. High-res stills also write a
-`.location.json` sidecar, so every image is reproducible.
-
-**Zoom videos.** Dive to a spot, then Video → Zoom-in video. You specify the
-zoom rate in ×/second (default 2.0 — a per-frame factor of 2^(1/30) ≈ 1.023
-at 30 fps, which reads as a smooth glide; 1.2×/frame would be ≈240×/s) and the
-duration is derived from total magnification. Frames are written directly into
-an H.264 MP4; check "keep PNG frames" to also get the sequence for your music
-edit. Default 4K, 2×2 supersampled.
-
-**Julia morph videos.** c travels a parametrized path: a circle around c₀
-(closes exactly → seamless loop), an outward spiral, or a line to a second
-constant (optionally there-and-back). "Combine with zoom" makes the set waft
-while diving.
-
-## Limits and roadmap (good Claude Code sessions)
-
-* **Depth**: float64 pixelates near ~10¹³ magnification; the app clamps there
-  and tells you. Going deeper means perturbation rendering — planned v2.
-* **CUDA**: rendering is Numba-parallel on all CPU cores. The kernel codegen in
-  `core/formulas.py` is isolated so a `numba.cuda` twin (and splitting frame
-  rows across your 4 Titan X's) is a clean drop-in — the top priority once the
-  app is on the target machine, since it will cut 4K frame times by an order
-  of magnitude. Written CPU-only for now because this build environment has no
-  GPU to test against.
-* **DeepDream frame filter** (phase 2): PyTorch + a pretrained CNN, gradient
-  ascent on each frame toward a chosen channel ("flower detector"), with
-  previous-frame seeding for temporal coherence.
-* Smaller ideas: pick c₁ for line morphs by clicking; per-preset default
-  palettes; palette rotation baked into videos at arbitrary phase; z₀ control
-  in the UI; arbitrary aspect-ratio video presets.
+* Zoom depth is float64-limited (~10^13); the app clamps there. Perturbation
+  rendering (f64 reference orbit + f32 per-pixel deltas — which would also
+  put *deep* frames on the GPUs) is the planned v2 depth solution.
+* GPU colorize/downsample (now the dominant per-frame cost at supersample 2)
+  and a Newton CUDA twin are the next acceleration steps.
+* Neural frame filters (DeepDream, style transfer) live in a separate
+  project: https://github.com/shimmeringvoid/Deep_Dream — the two connect
+  through PNG frame sequences.
 
 ## Layout
 
 ```
 main.py               entry point
-core/formulas.py      presets, formula parser/validator, Numba kernel codegen, Newton kernels
-core/engine.py        view math, strip/tile rendering, colorization, cancel/progress, locations
-core/palette.py       rainbow / sphere-path / gradient palettes, JSON I/O, cycling
-core/video.py         zoom + Julia-morph video pipelines (imageio-ffmpeg)
-gui/main_window.py    canvas, mouse navigation, threaded progressive rendering, dock, history
-gui/dialogs.py        palette editor, custom formula, high-res save, video export dialogs
-palettes/  locations/ bundled palettes and example bookmarks
+core/formulas.py      presets, formula parser, CPU + CUDA kernel codegen,
+                      Newton kernels, precision selection
+core/engine.py        view math, tiled rendering, colorization, precision
+                      handoff blending, locations
+core/palette.py       rainbow / sphere-path / gradient palettes, cycling
+core/video.py         zoom + morph video pipelines, multi-GPU frame sharding
+gui/                  main window, dialogs, in-app animation preview
+scripts/              reproducible GPU verification / handoff / pipeline benches
+docs/                 benchmark results and design rationale
+locations/ palettes/  bundled bookmarks and palettes
 ```
