@@ -3,3 +3,8 @@ __pycache__/
 *_frames/
 *.mp4
 *.png
+
+# exception: curated images referenced by the README
+!docs/images/*.png
+# Claude Code local settings (machine-specific, never commit)
+.claude/settings.local.json*
